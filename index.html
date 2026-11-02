@@ -1,0 +1,1806 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- 解決本機開啟時圖資伺服器阻擋 Referer 的問題 -->
+  <meta name="referrer" content="no-referrer-when-downgrade">
+  <title>GPX / KML / KMZ / Google JSON 軌跡路徑管理系統</title>
+  <!-- 載入 Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- 載入 Leaflet 地圖庫 -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- 載入 JSZip (解壓縮 KMZ 用) 與 toGeoJSON (備援解析用) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/togeojson/0.16.0/togeojson.min.js"></script>
+  <style>
+    body, html { height: 100vh; width: 100vw; margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; height: 100%; width: 100%; z-index: 1; background-color: #e2e8f0; }
+    .active-track-card { border-left: 6px solid #2563eb !important; background-color: #eff6ff !important; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f1f1; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+    #editPanel {
+      resize: both;
+      overflow: hidden;
+      min-width: 320px;
+      min-height: 44px;
+      max-width: 92vw;
+      max-height: 94vh;
+    }
+    .leaflet-popup-content { margin: 10px 12px; }
+    .resizable-popup {
+      resize: both;
+      overflow: auto;
+      min-width: 210px;
+      min-height: 80px;
+      max-width: 480px;
+      max-height: 380px;
+    }
+    .track-vertex-marker {
+      background-color: #ffffff;
+      border: 2px solid #2563eb;
+      border-radius: 50%;
+      cursor: pointer;
+      transition: transform 0.1s;
+    }
+    .track-vertex-marker:hover { transform: scale(1.3); background-color: #93c5fd; }
+    .split-cut-marker {
+      background-color: #9333ea;
+      border: 2px solid #ffffff;
+      border-radius: 50%;
+      box-shadow: 0 0 6px rgba(0,0,0,0.5);
+    }
+    .endpoint-badge {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 9999px;
+      font-size: 10px;
+      font-weight: bold;
+      color: white;
+      border: 2px solid white;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.35);
+    }
+  </style>
+</head>
+<body class="flex h-screen overflow-hidden bg-slate-100">
+
+  <!-- 左側控制與清單面板 -->
+  <div id="leftSidebar" class="w-[360px] shrink-0 h-full flex flex-col bg-white shadow-xl z-10 border-r border-slate-200 transition-all duration-300">
+    
+    <!-- 頂部標題與匯入按鈕 -->
+    <div class="p-3 bg-slate-800 text-white">
+      <div class="flex justify-between items-center mb-2">
+        <h1 class="text-base font-bold tracking-wide flex items-center gap-1.5">
+          <span>🗺️</span> 軌跡路徑管理系統
+        </h1>
+        <span id="syncStatus" class="text-[11px] px-2 py-0.5 rounded bg-slate-700 text-slate-300">尚未連接資料夾</span>
+      </div>
+      <div class="grid grid-cols-3 gap-1">
+        <button id="btnConnectFolder" class="bg-blue-600 hover:bg-blue-500 text-white py-1.5 px-1.5 rounded text-xs font-medium transition flex items-center justify-center gap-0.5 shadow">
+          📂 連接
+        </button>
+        <button id="btnRefreshFolder" class="bg-emerald-600 hover:bg-emerald-500 text-white py-1.5 px-1.5 rounded text-xs font-medium transition flex items-center justify-center gap-0.5 shadow">
+          🔄 重新整理
+        </button>
+        <label class="bg-slate-700 hover:bg-slate-600 text-white py-1.5 px-1.5 rounded text-xs font-medium transition flex items-center justify-center gap-0.5 cursor-pointer shadow" title="支援 GPX, KML, KMZ, Google JSON 檔">
+          📄 匯入
+          <input type="file" id="fileInput" multiple accept=".kml,.kmz,.gpx,.json" class="hidden">
+        </label>
+      </div>
+    </div>
+
+    <!-- 篩選區塊 -->
+    <div class="p-2.5 bg-slate-50 border-b border-slate-200 space-y-1.5 text-xs">
+      <div class="flex items-center justify-between font-semibold text-slate-700">
+        <span>🔍 檔名、分類與條件篩選</span>
+        <button id="btnResetFilter" class="text-blue-600 hover:underline">清除篩選</button>
+      </div>
+      
+      <div class="grid grid-cols-2 gap-1.5">
+        <select id="filterCategory" class="border border-slate-300 rounded p-1 bg-white font-medium text-slate-700">
+          <option value="">所有分類</option>
+          <option value="主題地圖">📌 主題地圖</option>
+          <option value="台灣旅遊地圖">🇹🇼 台灣旅遊地圖</option>
+          <option value="出國旅遊地圖">✈️ 出國旅遊地圖</option>
+          <option value="參考地圖">📖 參考地圖</option>
+          <option value="生活地圖">☕ 生活地圖</option>
+          <option value="Google足跡">🌐 Google足跡</option>
+          <option value="其他自訂分類">🏷️ 其他自訂分類</option>
+        </select>
+        <select id="filterYear" class="border border-slate-300 rounded p-1 bg-white">
+          <option value="">所有年份</option>
+        </select>
+      </div>
+
+      <div>
+        <input type="text" id="filterLocation" placeholder="輸入檔名或8碼日期(例如 20121201)..." class="border border-slate-300 rounded p-1 w-full bg-white">
+      </div>
+
+      <div class="flex items-center justify-between pt-1.5 border-t border-slate-200 text-slate-600">
+        <label class="flex items-center gap-1.5 cursor-pointer font-medium">
+          <input type="checkbox" id="toggleAllVisible" checked class="rounded text-blue-600">
+          <span>全選 / 取消顯示</span>
+        </label>
+        <span id="trackCount" class="text-slate-500">共 0 筆路徑</span>
+      </div>
+
+      <!-- 批次操作控制列 -->
+      <div class="flex items-center justify-between pt-1.5 border-t border-slate-200 text-slate-600">
+        <label class="flex items-center gap-1.5 cursor-pointer font-medium text-red-700">
+          <input type="checkbox" id="toggleAllDeleteSelect" class="rounded text-red-600 cursor-pointer">
+          <span>全選 / 取消選取</span>
+        </label>
+        <div class="flex gap-1">
+          <button id="btnMergeTracks" type="button" disabled class="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-300 disabled:text-slate-500 text-white px-2 py-1 rounded text-xs font-semibold transition shadow-sm" title="將勾選的多個地圖檔案組合成一個新的 GPX 檔案">
+            🧩 組合 (0)
+          </button>
+          <button id="btnBatchDelete" type="button" disabled class="bg-red-600 hover:bg-red-500 disabled:bg-slate-300 disabled:text-slate-500 text-white px-2 py-1 rounded text-xs font-semibold transition shadow-sm">
+            🗑️ 刪除 (0)
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 路徑檔案列表 -->
+    <div id="trackList" class="flex-1 overflow-y-auto p-2.5 space-y-2">
+      <div class="text-center text-slate-400 mt-12 text-sm">
+        請點擊上方按鈕連接資料夾或匯入檔案 (.gpx, .kml, .kmz, .json)
+      </div>
+    </div>
+  </div>
+
+  <!-- 右側地圖與浮動編輯面板 -->
+  <div class="flex-1 relative h-full">
+    <button id="btnToggleSidebar" type="button" class="absolute top-3 left-3 z-[1000] bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 px-2.5 py-1.5 rounded-md shadow-md text-xs font-bold flex items-center gap-1 transition" title="收合或展開左側清單">
+      <span>◀ 收合清單</span>
+    </button>
+
+    <div id="map"></div>
+
+    <!-- 新增地點模式提示列 -->
+    <div id="addWaypointBanner" class="hidden absolute top-4 left-1/2 -translate-x-1/2 z-[1000] bg-amber-500 text-white px-5 py-2.5 rounded-full shadow-lg font-bold text-sm flex items-center gap-3 animate-bounce">
+      <span>📍 請直接在地圖上點擊要新增地點的位置</span>
+      <button id="btnCancelWaypoint" class="bg-amber-700 hover:bg-amber-800 px-2.5 py-0.5 rounded-full text-xs">取消</button>
+    </div>
+
+    <!-- 多點軌跡切割模式提示列 -->
+    <div id="splitBanner" class="hidden absolute top-4 left-1/2 -translate-x-1/2 z-[1000] bg-purple-700 text-white px-5 py-2.5 rounded-full shadow-lg font-bold text-sm flex items-center gap-3 animate-bounce">
+      <span id="splitBannerText">✂️ 已選取 0 個切割點 (請在路線上點擊設定多個切割位置)</span>
+      <div class="flex gap-2">
+        <button id="btnConfirmSplit" class="bg-emerald-600 hover:bg-emerald-500 px-3 py-1 rounded-full text-xs font-bold shadow">✅ 確認執行切割</button>
+        <button id="btnCancelSplit" class="bg-purple-900 hover:bg-purple-950 px-2.5 py-1 rounded-full text-xs">取消</button>
+      </div>
+    </div>
+
+    <!-- 右上角：點選路徑顯示出的浮動資訊與高級編輯面板 -->
+    <div id="editPanel" class="hidden absolute top-3 right-3 z-[1000] w-[380px] bg-white/95 backdrop-blur rounded-lg shadow-2xl border border-slate-300 flex flex-col">
+      <div id="editPanelHeader" class="p-2.5 bg-slate-800 text-white rounded-t-lg flex justify-between items-center cursor-move select-none shrink-0" title="按住此標題列可自由拖曳浮動視窗位置">
+        <h3 class="font-bold text-xs flex items-center gap-1.5 truncate pr-2">
+          <span>✏️</span> <span id="editPanelTitleText">路徑與軌跡編輯</span>
+        </h3>
+        <div class="flex items-center gap-1 shrink-0">
+          <button id="btnMinEdit" type="button" class="text-slate-300 hover:text-white px-1.5 py-0.5 rounded hover:bg-slate-700 text-xs font-bold" title="縮小 / 展開">🗕</button>
+          <button id="btnMaxEdit" type="button" class="text-slate-300 hover:text-white px-1.5 py-0.5 rounded hover:bg-slate-700 text-xs font-bold" title="放大">🗖</button>
+          <button id="btnCloseEdit" type="button" class="text-slate-300 hover:text-red-400 px-1.5 py-0.5 rounded hover:bg-slate-700 text-base leading-none" title="關閉">&times;</button>
+        </div>
+      </div>
+
+      <div id="editPanelBody" class="p-3.5 overflow-y-auto space-y-2.5 text-xs flex-1 max-h-[75vh]">
+        <div>
+          <label class="block font-semibold text-slate-700 mb-1">檔案名稱 (同步修改硬碟檔名)</label>
+          <div class="flex gap-1">
+            <input type="text" id="editFileName" class="border border-slate-300 rounded p-1.5 flex-1 font-medium text-slate-800">
+            <span id="editFileExt" class="bg-slate-100 border border-slate-300 rounded px-2 py-1.5 text-slate-500 font-mono"></span>
+          </div>
+        </div>
+
+        <div class="space-y-1.5">
+          <label class="block font-semibold text-slate-700">路徑分類</label>
+          <div class="grid grid-cols-2 gap-2">
+            <select id="editCategorySelect" class="border border-slate-300 rounded p-1.5 bg-white font-medium text-slate-800">
+              <option value="主題地圖">📌 主題地圖</option>
+              <option value="台灣旅遊地圖">🇹🇼 台灣旅遊地圖</option>
+              <option value="出國旅遊地圖">✈️ 出國旅遊地圖</option>
+              <option value="參考地圖">📖 參考地圖</option>
+              <option value="生活地圖">☕ 生活地圖</option>
+              <option value="Google足跡">🌐 Google足跡</option>
+              <option value="其他自訂">🏷️ 其他自訂...</option>
+            </select>
+            <input type="text" id="editCategoryCustom" placeholder="輸入自訂分類..." class="border border-slate-300 rounded p-1.5 bg-white font-medium text-slate-800 hidden">
+          </div>
+        </div>
+
+        <div>
+          <label class="block font-semibold text-slate-700 mb-1">紀錄日期</label>
+          <input type="date" id="editDate" class="border border-slate-300 rounded p-1.5 w-full">
+        </div>
+
+        <div>
+          <label class="block font-semibold text-slate-700 mb-1">地點 / 路線區域</label>
+          <input type="text" id="editLocation" placeholder="路線區域..." class="border border-slate-300 rounded p-1.5 w-full">
+        </div>
+
+        <div class="bg-indigo-50 p-2.5 rounded border border-indigo-200 space-y-2">
+          <div class="font-bold text-indigo-900 border-b border-indigo-200 pb-1">✂️ 軌跡線條與節點進階編輯</div>
+          <div class="grid grid-cols-2 gap-2">
+            <button id="btnToggleVertexEdit" type="button" class="bg-indigo-600 hover:bg-indigo-500 text-white py-1.5 px-2 rounded font-medium transition shadow-sm flex items-center justify-center gap-1">
+              ✏️ 開啟節點編輯 (拖曳點位)
+            </button>
+            <button id="btnStartSplitTrack" type="button" class="bg-purple-600 hover:bg-purple-500 text-white py-1.5 px-2 rounded font-medium transition shadow-sm flex items-center justify-center gap-1">
+              ✂️ 多點自由切割軌跡
+            </button>
+          </div>
+        </div>
+
+        <div class="bg-slate-50 p-2.5 rounded border border-slate-200 space-y-1.5 text-[11px]">
+          <div class="font-bold text-slate-700 border-b pb-1">📊 路線軌跡數據</div>
+          <div class="grid grid-cols-2 gap-2 pt-1">
+            <div>📏 <span class="font-semibold text-slate-600">總距離：</span><span id="metaDistance" class="text-slate-800 font-bold">0.00 km</span></div>
+            <div>⛰️ <span class="font-semibold text-slate-600">總爬升：</span><span id="metaElevation" class="text-slate-800 font-bold">0 m</span></div>
+          </div>
+          <div class="grid grid-cols-2 gap-2 pt-0.5 text-slate-600">
+            <div>🛤️ <span class="font-semibold">路線段數：</span><span id="metaSegments" class="text-slate-800 font-bold">0</span> 段</div>
+            <div>📍 <span class="font-semibold">總座標點：</span><span id="metaCoordsCount" class="text-slate-800 font-bold">0</span> 點</div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2 pt-1">
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1">路徑顏色</label>
+            <div class="flex items-center gap-2">
+              <input type="color" id="editColor" class="h-8 w-14 cursor-pointer rounded border border-slate-300">
+              <span id="editColorHex" class="text-slate-500 font-mono">#FF0000</span>
+            </div>
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1">線條粗細：<span id="weightVal">4</span> px</label>
+            <input type="range" id="editWeight" min="1" max="12" value="4" class="w-full mt-1.5 cursor-pointer">
+          </div>
+        </div>
+
+        <div class="pt-2 border-t border-slate-200">
+          <div class="flex justify-between items-center mb-2">
+            <label class="font-semibold text-slate-700">📍 新增與管理標記地點</label>
+            <button id="btnStartAddWaypoint" class="bg-emerald-600 hover:bg-emerald-500 text-white px-2.5 py-1 rounded text-xs font-medium transition shadow-sm">
+              + 地圖點選新增
+            </button>
+          </div>
+          <div id="waypointList" class="space-y-1.5 max-h-32 overflow-y-auto pr-1"></div>
+        </div>
+      </div>
+
+      <div id="editPanelFooter" class="p-2.5 bg-slate-50 rounded-b-lg border-t border-slate-200 flex justify-between items-center gap-2 shrink-0">
+        <button id="btnDeleteTrack" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 py-1.5 px-3 rounded text-xs font-semibold transition">
+          🗑️ 刪除檔案
+        </button>
+        <div class="flex gap-1.5 mr-2">
+          <button id="btnZoomToTrack" class="bg-slate-200 hover:bg-slate-300 text-slate-700 py-1.5 px-2.5 rounded text-xs font-semibold transition">
+            🎯 縮放
+          </button>
+          <button id="btnSaveTrack" class="bg-blue-600 hover:bg-blue-500 text-white py-1.5 px-3.5 rounded text-xs font-semibold transition shadow">
+            💾 儲存修改
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  let map;
+  let directoryHandle = null; 
+  let tracks = [];            
+  let selectedTrackId = null; 
+  let selectedForDeleteIds = new Set(); 
+  let isAddingWaypoint = false;
+  let isSplittingTrack = false;
+  let splitPoints = []; 
+  let splitMarkersGroup = null;
+  let isVertexEditing = false;
+  let vertexMarkersGroup = null;
+  let geocodeQueue = [];      
+  let isGeocoding = false;
+  let isEditMinimized = false;
+  let isEditMaximized = false;
+  const METADATA_FILENAME = '_tracks_metadata.json';
+  const DEFAULT_COLORS = ['#ef4444', '#f97316', '#10b981', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899'];
+  const GOOGLE_JSON_COLOR = '#1e40af'; // 專屬 Google JSON 預設顏色：深藍色
+
+  function initMap() {
+    // 啟用 preferCanvas 大幅提升萬點以上完整路徑的繪製流暢度
+    map = L.map('map', { zoomControl: false, preferCanvas: true }).setView([23.6, 120.9], 8);
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+    
+    const googleStreets = L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', { maxZoom: 20, attribution: '© Google Maps' }).addTo(map);
+    const googleTerrain = L.tileLayer('https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}', { maxZoom: 20, attribution: '© Google Terrain' });
+    const googleSat = L.tileLayer('https://mt1.google.com/vt/lyrs=s,h&x={x}&y={y}&z={z}', { maxZoom: 20, attribution: '© Google Satellite' });
+    const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
+    const topo = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', { maxZoom: 17, attribution: '© OpenTopoMap' });
+
+    L.control.layers({
+      "標準街道圖 (Google)": googleStreets,
+      "等高線地形圖 (Google)": googleTerrain,
+      "衛星混合圖 (Google)": googleSat,
+      "OpenStreetMap": osm,
+      "OpenTopoMap": topo
+    }, null, { position: 'bottomleft' }).addTo(map);
+
+    vertexMarkersGroup = L.layerGroup().addTo(map);
+    splitMarkersGroup = L.layerGroup().addTo(map);
+
+    setTimeout(() => { map.invalidateSize(); }, 150);
+    setTimeout(() => { map.invalidateSize(); }, 500);
+    window.addEventListener('resize', () => { map.invalidateSize(); });
+
+    map.on('click', (e) => {
+      if (isAddingWaypoint && selectedTrackId) {
+        const track = tracks.find(t => t.id === selectedTrackId);
+        if (!track) return;
+        const title = prompt('請輸入此地點的名稱：', '新標記地點');
+        if (title !== null && title.trim() !== '') {
+          const desc = prompt('請輸入地點備註（可留空）：', '');
+          track.waypoints.push({ id: 'wp_' + Date.now(), name: title.trim(), desc: desc ? desc.trim() : '', lat: e.latlng.lat, lng: e.latlng.lng });
+          renderMapLayers(track);
+          renderWaypointList(track);
+          saveMetadataToStorage();
+        }
+        exitAddWaypointMode();
+      } else if (isSplittingTrack && selectedTrackId) {
+        addSplitPoint(e.latlng);
+      }
+    });
+
+    initFloatingPanelControls();
+  }
+
+  function initFloatingPanelControls() {
+    const sidebar = document.getElementById('leftSidebar');
+    const btnToggleSidebar = document.getElementById('btnToggleSidebar');
+    let sidebarOpen = true;
+    btnToggleSidebar.addEventListener('click', () => {
+      sidebarOpen = !sidebarOpen;
+      if (sidebarOpen) {
+        sidebar.classList.remove('hidden');
+        btnToggleSidebar.innerHTML = '<span>◀ 收合清單</span>';
+      } else {
+        sidebar.classList.add('hidden');
+        btnToggleSidebar.innerHTML = '<span>▶ 展開清單</span>';
+      }
+      setTimeout(() => { if (map) map.invalidateSize(); }, 310);
+    });
+
+    const panel = document.getElementById('editPanel');
+    const header = document.getElementById('editPanelHeader');
+    let isDragging = false;
+    let startX = 0, startY = 0, initialLeft = 0, initialTop = 0;
+
+    header.addEventListener('mousedown', (e) => {
+      if (e.target.closest('button')) return;
+      isDragging = true;
+      const rect = panel.getBoundingClientRect();
+      const parentRect = panel.parentElement.getBoundingClientRect();
+      panel.style.right = 'auto';
+      initialLeft = rect.left - parentRect.left;
+      initialTop = rect.top - parentRect.top;
+      panel.style.left = initialLeft + 'px';
+      panel.style.top = initialTop + 'px';
+      startX = e.clientX;
+      startY = e.clientY;
+      document.body.style.userSelect = 'none';
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      const parentRect = panel.parentElement.getBoundingClientRect();
+      let newLeft = Math.max(0, Math.min(parentRect.width - 80, initialLeft + dx));
+      let newTop = Math.max(0, Math.min(parentRect.height - 44, initialTop + dy));
+      panel.style.left = newLeft + 'px';
+      panel.style.top = newTop + 'px';
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (isDragging) {
+        isDragging = false;
+        document.body.style.userSelect = '';
+      }
+    });
+
+    const btnMin = document.getElementById('btnMinEdit');
+    const btnMax = document.getElementById('btnMaxEdit');
+    const bodyEl = document.getElementById('editPanelBody');
+    const footerEl = document.getElementById('editPanelFooter');
+
+    btnMin.addEventListener('click', () => {
+      isEditMinimized = !isEditMinimized;
+      if (isEditMinimized) {
+        bodyEl.classList.add('hidden');
+        footerEl.classList.add('hidden');
+        panel.style.height = 'auto';
+        panel.style.resize = 'none';
+        btnMin.textContent = '🗖';
+      } else {
+        bodyEl.classList.remove('hidden');
+        footerEl.classList.remove('hidden');
+        panel.style.resize = 'both';
+        btnMin.textContent = '🗕';
+      }
+    });
+
+    btnMax.addEventListener('click', () => {
+      if (isEditMinimized) btnMin.click();
+      isEditMaximized = !isEditMaximized;
+      if (isEditMaximized) {
+        panel.style.width = '540px';
+        bodyEl.style.maxHeight = '84vh';
+        btnMax.textContent = '🗗';
+      } else {
+        panel.style.width = '380px';
+        panel.style.height = 'auto';
+        bodyEl.style.maxHeight = '75vh';
+        btnMax.textContent = '🗖';
+      }
+    });
+  }
+
+  window.togglePopupSize = function(btn) {
+    const container = btn.closest('.resizable-popup');
+    if (!container) return;
+    if (container.dataset.expanded === 'true') {
+      container.style.width = '220px';
+      container.style.fontSize = '12px';
+      container.dataset.expanded = 'false';
+      btn.textContent = '🔍 放大';
+    } else {
+      container.style.width = '360px';
+      container.style.fontSize = '14px';
+      container.dataset.expanded = 'true';
+      btn.textContent = '🔍 縮小';
+    }
+  };
+
+  // ======================= 旅遊地圖遊記級：深度完整路徑解析引擎 =======================
+
+  // 輔助：解析 "lat, lng" 或 "23.123°, 120.456°" 字串
+  function parseLatLngString(str) {
+    if (!str || typeof str !== 'string') return null;
+    const cleaned = str.replace(/geo:/i, '').replace(/°/g, '').trim();
+    const parts = cleaned.split(',');
+    if (parts.length >= 2) {
+      const lat = parseFloat(parts[0]);
+      const lng = parseFloat(parts[1]);
+      if (!isNaN(lat) && !isNaN(lng)) return [lng, lat];
+    }
+    return null;
+  }
+
+  // 1. 深度解析 GPX (完整支援多段 trkseg, rte, wpt)
+  function parseFullGPX(xmlDoc, fileName) {
+    const features = [];
+
+    // 讀取所有 <trk> 與 <trkseg>
+    const trks = Array.from(xmlDoc.getElementsByTagName('trk'));
+    trks.forEach((trk, tIdx) => {
+      const trkNameNode = trk.getElementsByTagName('name')[0];
+      const trkName = trkNameNode ? trkNameNode.textContent.trim() : `${fileName} - 軌跡 ${tIdx + 1}`;
+      const segs = Array.from(trk.getElementsByTagName('trkseg'));
+      
+      segs.forEach((seg, sIdx) => {
+        const pts = Array.from(seg.getElementsByTagName('trkpt'));
+        const coords = [];
+        pts.forEach(pt => {
+          const lat = parseFloat(pt.getAttribute('lat'));
+          const lon = parseFloat(pt.getAttribute('lon'));
+          if (!isNaN(lat) && !isNaN(lon)) {
+            const eleNode = pt.getElementsByTagName('ele')[0];
+            const ele = eleNode ? parseFloat(eleNode.textContent) : null;
+            if (ele !== null && !isNaN(ele)) coords.push([lon, lat, ele]);
+            else coords.push([lon, lat]);
+          }
+        });
+        if (coords.length > 0) {
+          features.push({
+            type: 'Feature',
+            geometry: { type: coords.length === 1 ? 'Point' : 'LineString', coordinates: coords.length === 1 ? coords[0] : coords },
+            properties: { name: segs.length > 1 ? `${trkName} (分段 ${sIdx + 1})` : trkName }
+          });
+        }
+      });
+    });
+
+    // 讀取所有 <rte> 規劃路線
+    const rtes = Array.from(xmlDoc.getElementsByTagName('rte'));
+    rtes.forEach((rte, rIdx) => {
+      const rteNameNode = rte.getElementsByTagName('name')[0];
+      const rteName = rteNameNode ? rteNameNode.textContent.trim() : `${fileName} - 路線 ${rIdx + 1}`;
+      const pts = Array.from(rte.getElementsByTagName('rtept'));
+      const coords = [];
+      pts.forEach(pt => {
+        const lat = parseFloat(pt.getAttribute('lat'));
+        const lon = parseFloat(pt.getAttribute('lon'));
+        if (!isNaN(lat) && !isNaN(lon)) {
+          const eleNode = pt.getElementsByTagName('ele')[0];
+          const ele = eleNode ? parseFloat(eleNode.textContent) : null;
+          if (ele !== null && !isNaN(ele)) coords.push([lon, lat, ele]);
+          else coords.push([lon, lat]);
+        }
+      });
+      if (coords.length > 0) {
+        features.push({
+          type: 'Feature',
+          geometry: { type: coords.length === 1 ? 'Point' : 'LineString', coordinates: coords.length === 1 ? coords[0] : coords },
+          properties: { name: rteName }
+        });
+      }
+    });
+
+    // 讀取所有 <wpt> 航點
+    const wpts = Array.from(xmlDoc.getElementsByTagName('wpt'));
+    wpts.forEach((wpt, wIdx) => {
+      const lat = parseFloat(wpt.getAttribute('lat'));
+      const lon = parseFloat(wpt.getAttribute('lon'));
+      if (!isNaN(lat) && !isNaN(lon)) {
+        const nameNode = wpt.getElementsByTagName('name')[0];
+        const descNode = wpt.getElementsByTagName('desc')[0] || wpt.getElementsByTagName('cmt')[0];
+        const eleNode = wpt.getElementsByTagName('ele')[0];
+        const ele = eleNode ? parseFloat(eleNode.textContent) : null;
+        features.push({
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: (ele !== null && !isNaN(ele)) ? [lon, lat, ele] : [lon, lat] },
+          properties: {
+            name: nameNode ? nameNode.textContent.trim() : `航點 ${wIdx + 1}`,
+            description: descNode ? descNode.textContent.trim() : ''
+          }
+        });
+      }
+    });
+
+    if (features.length === 0 && typeof toGeoJSON !== 'undefined') {
+      return toGeoJSON.gpx(xmlDoc);
+    }
+    return { type: 'FeatureCollection', features };
+  }
+
+  // 2. 深度解析 KML (完整支援 LineString, gx:Track, gx:MultiTrack, Polygon, MultiGeometry, Point)
+  function parseFullKML(xmlDoc, fileName) {
+    const features = [];
+
+    function parseCoordinatesText(text) {
+      const coords = [];
+      if (!text) return coords;
+      const tuples = text.trim().split(/\s+/);
+      tuples.forEach(t => {
+        const parts = t.split(',');
+        if (parts.length >= 2) {
+          const lon = parseFloat(parts[0]);
+          const lat = parseFloat(parts[1]);
+          const ele = parts.length >= 3 ? parseFloat(parts[2]) : null;
+          if (!isNaN(lon) && !isNaN(lat)) {
+            if (ele !== null && !isNaN(ele)) coords.push([lon, lat, ele]);
+            else coords.push([lon, lat]);
+          }
+        }
+      });
+      return coords;
+    }
+
+    function parseGxTrackNode(trackNode) {
+      const coords = [];
+      const coordNodes = Array.from(trackNode.getElementsByTagNameNS('*', 'coord'));
+      const fallbackNodes = coordNodes.length ? coordNodes : Array.from(trackNode.getElementsByTagName('gx:coord'));
+      fallbackNodes.forEach(cn => {
+        const parts = cn.textContent.trim().split(/\s+/);
+        if (parts.length >= 2) {
+          const lon = parseFloat(parts[0]);
+          const lat = parseFloat(parts[1]);
+          const ele = parts.length >= 3 ? parseFloat(parts[2]) : null;
+          if (!isNaN(lon) && !isNaN(lat)) {
+            if (ele !== null && !isNaN(ele)) coords.push([lon, lat, ele]);
+            else coords.push([lon, lat]);
+          }
+        }
+      });
+      return coords;
+    }
+
+    const placemarks = Array.from(xmlDoc.getElementsByTagName('Placemark'));
+    placemarks.forEach((pm, pIdx) => {
+      const nameNode = pm.getElementsByTagName('name')[0];
+      const descNode = pm.getElementsByTagName('description')[0];
+      const pmName = nameNode ? nameNode.textContent.trim() : `${fileName} - 標記 ${pIdx + 1}`;
+      const pmDesc = descNode ? descNode.textContent.trim().replace(/<[^>]*>?/gm, '') : '';
+
+      let hasGeometry = false;
+
+      // (a) 處理所有 LineString
+      const lineStrings = Array.from(pm.getElementsByTagName('LineString'));
+      lineStrings.forEach(ls => {
+        const coordNode = ls.getElementsByTagName('coordinates')[0];
+        if (coordNode) {
+          const coords = parseCoordinatesText(coordNode.textContent);
+          if (coords.length > 0) {
+            hasGeometry = true;
+            features.push({
+              type: 'Feature',
+              geometry: { type: coords.length === 1 ? 'Point' : 'LineString', coordinates: coords.length === 1 ? coords[0] : coords },
+              properties: { name: pmName, description: pmDesc }
+            });
+          }
+        }
+      });
+
+      // (b) 處理所有 gx:Track
+      const gxTracks = Array.from(pm.getElementsByTagNameNS('*', 'Track'));
+      const gxTracksFallback = gxTracks.length ? gxTracks : Array.from(pm.getElementsByTagName('gx:Track'));
+      gxTracksFallback.forEach(gt => {
+        const coords = parseGxTrackNode(gt);
+        if (coords.length > 0) {
+          hasGeometry = true;
+          features.push({
+            type: 'Feature',
+            geometry: { type: coords.length === 1 ? 'Point' : 'LineString', coordinates: coords.length === 1 ? coords[0] : coords },
+            properties: { name: pmName, description: pmDesc }
+          });
+        }
+      });
+
+      // (c) 處理所有 Polygon (外框轉為完整路徑線條)
+      const polygons = Array.from(pm.getElementsByTagName('Polygon'));
+      polygons.forEach(poly => {
+        const coordNode = poly.getElementsByTagName('coordinates')[0];
+        if (coordNode) {
+          const coords = parseCoordinatesText(coordNode.textContent);
+          if (coords.length > 0) {
+            hasGeometry = true;
+            features.push({
+              type: 'Feature',
+              geometry: { type: 'LineString', coordinates: coords },
+              properties: { name: pmName, description: pmDesc }
+            });
+          }
+        }
+      });
+
+      // (d) 處理所有 Point
+      const points = Array.from(pm.getElementsByTagName('Point'));
+      points.forEach(pt => {
+        const coordNode = pt.getElementsByTagName('coordinates')[0];
+        if (coordNode) {
+          const coords = parseCoordinatesText(coordNode.textContent);
+          if (coords.length > 0) {
+            hasGeometry = true;
+            features.push({
+              type: 'Feature',
+              geometry: { type: 'Point', coordinates: coords[0] },
+              properties: { name: pmName, description: pmDesc }
+            });
+          }
+        }
+      });
+    });
+
+    // 若檔案沒有標準 Placemark 包裝，直接搜尋全域 gx:Track 或 LineString
+    if (features.length === 0) {
+      const allGxTracks = Array.from(xmlDoc.getElementsByTagNameNS('*', 'Track'));
+      allGxTracks.forEach((gt, idx) => {
+        const coords = parseGxTrackNode(gt);
+        if (coords.length > 1) {
+          features.push({
+            type: 'Feature',
+            geometry: { type: 'LineString', coordinates: coords },
+            properties: { name: `${fileName} - 軌跡 ${idx + 1}` }
+          });
+        }
+      });
+    }
+
+    if (features.length === 0 && typeof toGeoJSON !== 'undefined') {
+      return toGeoJSON.kml(xmlDoc);
+    }
+    return { type: 'FeatureCollection', features };
+  }
+
+  // 3. 深度解析 Google JSON 檔案 (比照旅遊地圖遊記系統，完整取出所有移動路線段與停留地標)
+  async function parseGoogleJsonFile(file) {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    const features = [];
+    const locationsSet = new Set();
+    let earliestTimestamp = null;
+
+    function recordTime(tStr) {
+      if (!tStr) return;
+      const d = new Date(tStr);
+      if (!isNaN(d.getTime())) {
+        if (!earliestTimestamp || d < earliestTimestamp) earliestTimestamp = d;
+      }
+    }
+
+    // 若本身就是標準 GeoJSON 格式
+    if (data.type === 'FeatureCollection' && Array.isArray(data.features)) {
+      const stats = calculateTrackStats(data);
+      const firstCoord = getFirstCoordFromGeoJSON(data);
+      return {
+        geojson: data,
+        extractedDate: '',
+        extractedLocation: file.name.replace(/\.json$/i, ''),
+        distance: stats.distance,
+        elevation: stats.elevation,
+        firstCoord,
+        rawContent: text
+      };
+    }
+
+    // (A) 解析 Google Takeout 的 Semantic Location History (timelineObjects)
+    if (Array.isArray(data.timelineObjects)) {
+      data.timelineObjects.forEach((obj) => {
+        // 1. 處理移動路徑段 activitySegment
+        if (obj.activitySegment) {
+          const seg = obj.activitySegment;
+          if (seg.duration && seg.duration.startTimestamp) recordTime(seg.duration.startTimestamp);
+          const segCoords = [];
+
+          // 起點
+          if (seg.startLocation && seg.startLocation.latitudeE7) {
+            segCoords.push([seg.startLocation.longitudeE7 / 1e7, seg.startLocation.latitudeE7 / 1e7]);
+          }
+          // 優先抓取最精細的 simplifiedRawPath，其次 waypointPath，再其次 transitPath
+          if (seg.simplifiedRawPath && Array.isArray(seg.simplifiedRawPath.points)) {
+            seg.simplifiedRawPath.points.forEach(p => {
+              const lat = p.latE7 ? p.latE7 / 1e7 : p.lat;
+              const lng = p.lngE7 ? p.lngE7 / 1e7 : p.lng;
+              if (lat && lng) segCoords.push([lng, lat]);
+            });
+          } else if (seg.waypointPath && Array.isArray(seg.waypointPath.points)) {
+            seg.waypointPath.points.forEach(p => {
+              const lat = p.latE7 ? p.latE7 / 1e7 : p.lat;
+              const lng = p.lngE7 ? p.lngE7 / 1e7 : p.lng;
+              if (lat && lng) segCoords.push([lng, lat]);
+            });
+          } else if (seg.transitPath && Array.isArray(seg.transitPath.transitStops)) {
+            seg.transitPath.transitStops.forEach(s => {
+              if (s.latitudeE7 && s.longitudeE7) segCoords.push([s.longitudeE7 / 1e7, s.latitudeE7 / 1e7]);
+            });
+          }
+          // 終點
+          if (seg.endLocation && seg.endLocation.latitudeE7) {
+            const endLon = seg.endLocation.longitudeE7 / 1e7;
+            const endLat = seg.endLocation.latitudeE7 / 1e7;
+            if (segCoords.length === 0 || segCoords[segCoords.length - 1][0] !== endLon || segCoords[segCoords.length - 1][1] !== endLat) {
+              segCoords.push([endLon, endLat]);
+            }
+          }
+
+          if (segCoords.length >= 2) {
+            features.push({
+              type: 'Feature',
+              geometry: { type: 'LineString', coordinates: segCoords },
+              properties: { name: seg.activityType || '移動路徑' }
+            });
+          }
+        }
+
+        // 2. 處理造訪地點 placeVisit
+        if (obj.placeVisit && obj.placeVisit.location) {
+          const pv = obj.placeVisit;
+          if (pv.duration && pv.duration.startTimestamp) recordTime(pv.duration.startTimestamp);
+          const loc = pv.location;
+          const lat = loc.latitudeE7 ? loc.latitudeE7 / 1e7 : loc.latitude;
+          const lon = loc.longitudeE7 ? loc.longitudeE7 / 1e7 : loc.longitude;
+          if (lat && lon) {
+            const locName = loc.name || loc.address || '造訪地點';
+            if (loc.name) locationsSet.add(loc.name);
+            features.push({
+              type: 'Feature',
+              geometry: { type: 'Point', coordinates: [lon, lat] },
+              properties: { name: locName, description: loc.address || '' }
+            });
+          }
+        }
+      });
+    }
+
+    // (B) 解析新版 Google Timeline 匯出格式 (semanticSegments)
+    if (Array.isArray(data.semanticSegments)) {
+      data.semanticSegments.forEach(seg => {
+        if (seg.startTime) recordTime(seg.startTime);
+        if (Array.isArray(seg.timelinePath) && seg.timelinePath.length > 0) {
+          const segCoords = [];
+          seg.timelinePath.forEach(pt => {
+            const c = parseLatLngString(pt.point);
+            if (c) segCoords.push(c);
+          });
+          if (segCoords.length >= 2) {
+            features.push({
+              type: 'Feature',
+              geometry: { type: 'LineString', coordinates: segCoords },
+              properties: { name: '時間軸軌跡' }
+            });
+          }
+        }
+        if (seg.visit && seg.visit.topCandidate && seg.visit.topCandidate.placeLocation) {
+          const c = parseLatLngString(seg.visit.topCandidate.placeLocation.latLng);
+          if (c) {
+            features.push({
+              type: 'Feature',
+              geometry: { type: 'Point', coordinates: c },
+              properties: { name: seg.visit.topCandidate.placeId || '停留點' }
+            });
+          }
+        }
+      });
+    }
+
+    // (C) 解析 Records.json / 原始座標陣列格式 (locations)
+    const rawLocations = data.locations || (Array.isArray(data) ? data : null);
+    if (Array.isArray(rawLocations) && features.length === 0) {
+      const lineCoords = [];
+      rawLocations.forEach(item => {
+        if (item.timestamp || item.timestampMs) recordTime(item.timestamp || Number(item.timestampMs));
+        const lat = item.latitudeE7 ? item.latitudeE7 / 1e7 : (item.lat || item.latitude);
+        const lon = item.longitudeE7 ? item.longitudeE7 / 1e7 : (item.lng || item.longitude || item.lon);
+        const ele = item.altitude !== undefined ? Number(item.altitude) : null;
+        if (lat && lon) {
+          if (ele !== null && !isNaN(ele)) lineCoords.push([lon, lat, ele]);
+          else lineCoords.push([lon, lat]);
+        }
+      });
+      if (lineCoords.length > 0) {
+        features.push({
+          type: 'Feature',
+          geometry: { type: lineCoords.length === 1 ? 'Point' : 'LineString', coordinates: lineCoords.length === 1 ? lineCoords[0] : lineCoords },
+          properties: { name: file.name }
+        });
+      }
+    }
+
+    // 若只有地點標記沒有軌跡線段，將依時間排序的地點連成一條完整足跡路徑以便檢視
+    const hasLine = features.some(f => f.geometry && f.geometry.type === 'LineString');
+    if (!hasLine && features.length >= 2) {
+      const connectedCoords = features
+        .filter(f => f.geometry && f.geometry.type === 'Point')
+        .map(f => f.geometry.coordinates);
+      if (connectedCoords.length >= 2) {
+        features.unshift({
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: connectedCoords },
+          properties: { name: '串連足跡路線' }
+        });
+      }
+    }
+
+    const geojson = { type: 'FeatureCollection', features };
+
+    // 日期判讀：優先順序 1 (內容時間戳記) -> 優先順序 2 (檔名日期/英文月份如 2011_AUGUST)
+    let extractedDate = '';
+    if (earliestTimestamp) {
+      extractedDate = formatLocalDateTime(earliestTimestamp).date;
+    }
+    if (!extractedDate) {
+      const m8 = file.name.match(/(20\d{2}|19\d{2})(\d{2})(\d{2})/);
+      const mMonthEn = file.name.match(/(20\d{2}|19\d{2})[_-](JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)/i);
+      const monthMap = { JANUARY:'01', FEBRUARY:'02', MARCH:'03', APRIL:'04', MAY:'05', JUNE:'06', JULY:'07', AUGUST:'08', SEPTEMBER:'09', OCTOBER:'10', NOVEMBER:'11', DECEMBER:'12' };
+      if (m8) {
+        extractedDate = `${m8[1]}-${m8[2]}-${m8[3]}`;
+      } else if (mMonthEn) {
+        extractedDate = `${mMonthEn[1]}-${monthMap[mMonthEn[2].toUpperCase()]}-01`;
+      }
+    }
+
+    const extractedLocation = Array.from(locationsSet).slice(0, 3).join('、') || '';
+    const stats = calculateTrackStats(geojson);
+    const firstCoord = getFirstCoordFromGeoJSON(geojson);
+
+    return {
+      geojson,
+      extractedDate,
+      extractedLocation,
+      distance: stats.distance,
+      elevation: stats.elevation,
+      firstCoord,
+      rawContent: text
+    };
+  }
+
+  // ======================= 多點自由切割功能 (支援多段軌跡) =======================
+  document.getElementById('btnStartSplitTrack').addEventListener('click', () => {
+    if (!selectedTrackId) return;
+    isSplittingTrack = true;
+    splitPoints = [];
+    splitMarkersGroup.clearLayers();
+    document.getElementById('splitBanner').classList.remove('hidden');
+    document.getElementById('splitBannerText').textContent = `✂️ 已選取 0 個切割點 (請在路線上點擊設定多個切割位置)`;
+    if (isVertexEditing) document.getElementById('btnToggleVertexEdit').click();
+  });
+
+  document.getElementById('btnCancelSplit').addEventListener('click', cancelSplitMode);
+
+  function cancelSplitMode() {
+    isSplittingTrack = false;
+    splitPoints = [];
+    splitMarkersGroup.clearLayers();
+    document.getElementById('splitBanner').classList.add('hidden');
+  }
+
+  function addSplitPoint(clickLatLng) {
+    const track = tracks.find(t => t.id === selectedTrackId);
+    if (!track || !track.geojson || !track.geojson.features) return;
+
+    let targetFeatureIdx = -1;
+    let closestCoordIdx = -1;
+    let minDist = Infinity;
+
+    track.geojson.features.forEach((f, fIdx) => {
+      if (!f.geometry || f.geometry.type !== 'LineString') return;
+      f.geometry.coordinates.forEach((coord, cIdx) => {
+        const dist = Math.pow(coord[1] - clickLatLng.lat, 2) + Math.pow(coord[0] - clickLatLng.lng, 2);
+        if (dist < minDist) {
+          minDist = dist;
+          targetFeatureIdx = fIdx;
+          closestCoordIdx = cIdx;
+        }
+      });
+    });
+
+    if (targetFeatureIdx === -1 || closestCoordIdx <= 0 || closestCoordIdx >= track.geojson.features[targetFeatureIdx].geometry.coordinates.length - 1) {
+      alert('請點擊在路線中間的座標點上！');
+      return;
+    }
+
+    splitPoints.push({ featureIdx: targetFeatureIdx, coordIdx: closestCoordIdx });
+    const coord = track.geojson.features[targetFeatureIdx].geometry.coordinates[closestCoordIdx];
+    const marker = L.marker([coord[1], coord[0]], {
+      icon: L.divIcon({ className: 'split-cut-marker', iconSize: [12, 12], iconAnchor: [6, 6] })
+    });
+    splitMarkersGroup.addLayer(marker);
+
+    document.getElementById('splitBannerText').textContent = `✂️ 已選取 ${splitPoints.length} 個切割點 (可繼續點擊新增)`;
+  }
+
+  document.getElementById('btnConfirmSplit').addEventListener('click', () => {
+    const track = tracks.find(t => t.id === selectedTrackId);
+    if (!track) return;
+
+    const lineFeatures = track.geojson.features.filter(f => f.geometry && f.geometry.type === 'LineString');
+
+    // 若使用者未手動點選切割點，但該檔案本身包含多個獨立路徑段落 (例如組合後的地圖)，支援一鍵拆回獨立檔案！
+    if (splitPoints.length === 0) {
+      if (lineFeatures.length > 1) {
+        if (!confirm(`此檔案包含 ${lineFeatures.length} 段獨立路徑，是否直接將它們拆分為 ${lineFeatures.length} 個獨立檔案？`)) return;
+        lineFeatures.forEach((lf, idx) => {
+          const singleGeo = { type: 'FeatureCollection', features: [JSON.parse(JSON.stringify(lf))] };
+          createSplitFileAndImport(`${track.baseName}_seg${idx + 1}.gpx`, singleGeo, track);
+        });
+        if (directoryHandle && track.fileHandle) directoryHandle.removeEntry(track.fileName).catch(() => {});
+        if (track.layerGroup) map.removeLayer(track.layerGroup);
+        tracks = tracks.filter(t => t.id !== track.id);
+        cancelSplitMode();
+        document.getElementById('editPanel').classList.add('hidden');
+        updateYearFilterOptions(); applyFiltersAndRender(); saveMetadataToStorage();
+        alert(`已成功拆分為 ${lineFeatures.length} 個獨立路徑檔案！`);
+        return;
+      } else {
+        alert('請先在路線上點擊要切斷的位置！');
+        return;
+      }
+    }
+
+    // 依據每個 feature 內設定的切割點進行多段分割
+    const newSegmentsGeoJSON = [];
+    track.geojson.features.forEach((f, fIdx) => {
+      if (!f.geometry || f.geometry.type !== 'LineString') return;
+      const fSplits = splitPoints.filter(sp => sp.featureIdx === fIdx).sort((a, b) => a.coordIdx - b.coordIdx);
+      if (fSplits.length === 0) {
+        newSegmentsGeoJSON.push({ type: 'FeatureCollection', features: [JSON.parse(JSON.stringify(f))] });
+      } else {
+        const coords = f.geometry.coordinates;
+        let lastIdx = 0;
+        fSplits.forEach(sp => {
+          const seg = coords.slice(lastIdx, sp.coordIdx + 1);
+          if (seg.length >= 2) {
+            newSegmentsGeoJSON.push({
+              type: 'FeatureCollection',
+              features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: seg }, properties: { ...f.properties } }]
+            });
+          }
+          lastIdx = sp.coordIdx;
+        });
+        const tail = coords.slice(lastIdx);
+        if (tail.length >= 2) {
+          newSegmentsGeoJSON.push({
+            type: 'FeatureCollection',
+            features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: tail }, properties: { ...f.properties } }]
+          });
+        }
+      }
+    });
+
+    newSegmentsGeoJSON.forEach((g, sIdx) => {
+      createSplitFileAndImport(`${track.baseName}_part${sIdx + 1}.gpx`, g, track);
+    });
+
+    if (directoryHandle && track.fileHandle) {
+      directoryHandle.removeEntry(track.fileName).catch(() => {});
+    }
+    if (track.layerGroup) map.removeLayer(track.layerGroup);
+    tracks = tracks.filter(t => t.id !== track.id);
+
+    cancelSplitMode();
+    document.getElementById('editPanel').classList.add('hidden');
+    updateYearFilterOptions(); applyFiltersAndRender(); saveMetadataToStorage();
+    alert(`成功將軌跡自由切割為 ${newSegmentsGeoJSON.length} 個獨立檔案！`);
+  });
+
+  document.getElementById('btnToggleVertexEdit').addEventListener('click', () => {
+    if (!selectedTrackId) return;
+    const track = tracks.find(t => t.id === selectedTrackId);
+    if (!track) return;
+
+    isVertexEditing = !isVertexEditing;
+    const btn = document.getElementById('btnToggleVertexEdit');
+    if (isVertexEditing) {
+      btn.className = 'bg-amber-600 hover:bg-amber-500 text-white py-1.5 px-2 rounded font-medium transition shadow-sm flex items-center justify-center gap-1';
+      btn.textContent = '🔒 關閉節點編輯';
+      renderVertexHandles(track);
+      alert('已開啟節點編輯模式：直接用滑鼠拖曳藍白圓點即可調整路線！（右鍵點擊節點可刪除該點）');
+    } else {
+      btn.className = 'bg-indigo-600 hover:bg-indigo-500 text-white py-1.5 px-2 rounded font-medium transition shadow-sm flex items-center justify-center gap-1';
+      btn.textContent = '✏️ 開啟節點編輯 (拖曳點位)';
+      vertexMarkersGroup.clearLayers();
+    }
+  });
+
+  function renderVertexHandles(track) {
+    vertexMarkersGroup.clearLayers();
+    if (!track.geojson || !track.geojson.features) return;
+
+    // 計算總點數，若超過 600 點自動進行視覺抽樣以避免瀏覽器產生數萬個 DOM 卡頓
+    let totalPts = 0;
+    track.geojson.features.forEach(f => {
+      if (f.geometry && f.geometry.type === 'LineString') totalPts += f.geometry.coordinates.length;
+    });
+    const step = totalPts > 600 ? Math.ceil(totalPts / 600) : 1;
+
+    track.geojson.features.forEach((f) => {
+      if (!f.geometry || f.geometry.type !== 'LineString') return;
+      const coords = f.geometry.coordinates;
+      coords.forEach((coord, cIdx) => {
+        if (cIdx % step !== 0 && cIdx !== coords.length - 1) return;
+        const marker = L.marker([coord[1], coord[0]], {
+          draggable: true,
+          icon: L.divIcon({ className: 'track-vertex-marker', iconSize: [10, 10], iconAnchor: [5, 5] })
+        });
+
+        marker.on('drag', (e) => {
+          const ll = e.target.getLatLng();
+          coord[0] = ll.lng; coord[1] = ll.lat;
+          if (track.layerGroup) map.removeLayer(track.layerGroup);
+          renderMapLayers(track);
+          const stats = calculateTrackStats(track.geojson);
+          track.distance = stats.distance; track.elevation = stats.elevation;
+          document.getElementById('metaDistance').textContent = `${track.distance} km`;
+          document.getElementById('metaElevation').textContent = `${track.elevation} m`;
+        });
+
+        // 右鍵點擊節點可刪除該異常漂移點
+        marker.on('contextmenu', () => {
+          if (coords.length <= 2) return;
+          coords.splice(cIdx, 1);
+          renderMapLayers(track);
+          renderVertexHandles(track);
+          const stats = calculateTrackStats(track.geojson);
+          track.distance = stats.distance; track.elevation = stats.elevation;
+          document.getElementById('metaDistance').textContent = `${track.distance} km`;
+          document.getElementById('metaElevation').textContent = `${track.elevation} m`;
+          saveMetadataToStorage();
+        });
+
+        marker.on('dragend', () => saveMetadataToStorage());
+        vertexMarkersGroup.addLayer(marker);
+      });
+    });
+  }
+
+  function createSplitFileAndImport(newFileName, geojson, oldTrack) {
+    let gpxXml = '';
+    geojson.features.forEach(f => {
+      if (f.geometry && f.geometry.type === 'LineString') {
+        gpxXml += `  <trk>\n    <name>${escapeHtml(newFileName)}</name>\n    <trkseg>\n`;
+        f.geometry.coordinates.forEach(c => {
+          const eleTag = c.length > 2 && c[2] !== null ? `<ele>${c[2]}</ele>` : '';
+          gpxXml += `      <trkpt lat="${c[1]}" lon="${c[0]}">${eleTag}</trkpt>\n`;
+        });
+        gpxXml += `    </trkseg>\n  </trk>\n`;
+      }
+    });
+    const content = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.0" xmlns="http://www.topografix.com/GPX/1/0">\n${gpxXml}</gpx>`;
+    
+    const stats = calculateTrackStats(geojson);
+    const lastDot = newFileName.lastIndexOf('.');
+    const trackObj = {
+      id: 'trk_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+      fileName: newFileName, baseName: lastDot !== -1 ? newFileName.substring(0, lastDot) : newFileName,
+      ext: lastDot !== -1 ? newFileName.substring(lastDot) : '', fileHandle: null,
+      rawContent: content, geojson: geojson, category: oldTrack.category, date: oldTrack.date,
+      location: oldTrack.location, notes: '', distance: stats.distance, elevation: stats.elevation,
+      segmentsCount: stats.segmentsCount, coordsCount: stats.coordsCount,
+      color: oldTrack.category === 'Google足跡' ? GOOGLE_JSON_COLOR : DEFAULT_COLORS[tracks.length % DEFAULT_COLORS.length], 
+      weight: 4, visible: true, waypoints: [], layerGroup: null
+    };
+    tracks.push(trackObj);
+    renderMapLayers(trackObj);
+  }
+
+  // ======================= 統計與通用函式 (每一獨立路線段分開累計，避免跨段跳躍誤差) =======================
+  function calculateTrackStats(geojson) {
+    let totalDist = 0, totalAscent = 0, segmentsCount = 0, coordsCount = 0;
+    if (!geojson || !geojson.features) return { distance: '0.00', elevation: '0', segmentsCount: 0, coordsCount: 0 };
+
+    function getDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180, dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2)**2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    function processLineCoords(pts) {
+      if (!pts || pts.length < 2) return;
+      segmentsCount++;
+      coordsCount += pts.length;
+      let lastLat = null, lastLon = null, lastEle = null;
+      pts.forEach(p => {
+        const lon = Number(p[0]), lat = Number(p[1]);
+        const ele = p.length > 2 && p[2] !== null ? Number(p[2]) : null;
+        if (isNaN(lat) || isNaN(lon)) return;
+        if (lastLat !== null && lastLon !== null) {
+          totalDist += getDistance(lastLat, lastLon, lat, lon);
+        }
+        if (lastEle !== null && ele !== null && !isNaN(ele) && ele > lastEle) {
+          totalAscent += (ele - lastEle);
+        }
+        lastLat = lat; lastLon = lon;
+        if (ele !== null && !isNaN(ele)) lastEle = ele;
+      });
+    }
+
+    geojson.features.forEach(f => {
+      if (!f.geometry || !f.geometry.coordinates) return;
+      const type = f.geometry.type;
+      const coords = f.geometry.coordinates;
+      if (type === 'LineString') {
+        processLineCoords(coords);
+      } else if (type === 'MultiLineString' || type === 'Polygon') {
+        coords.forEach(sub => processLineCoords(sub));
+      } else if (type === 'GeometryCollection' && Array.isArray(f.geometry.geometries)) {
+        f.geometry.geometries.forEach(g => {
+          if (g.type === 'LineString') processLineCoords(g.coordinates);
+          else if (g.type === 'MultiLineString') g.coordinates.forEach(sub => processLineCoords(sub));
+        });
+      }
+    });
+
+    return {
+      distance: totalDist.toFixed(2),
+      elevation: Math.round(totalAscent),
+      segmentsCount,
+      coordsCount
+    };
+  }
+
+  function formatLocalDateTime(dateObj) {
+    const pad = n => String(n).padStart(2, '0');
+    return { date: `${dateObj.getFullYear()}-${pad(dateObj.getMonth() + 1)}-${pad(dateObj.getDate())}` };
+  }
+
+  function getFirstCoordFromGeoJSON(geojson) {
+    if (!geojson || !geojson.features) return null;
+    for (const f of geojson.features) {
+      if (!f.geometry || !f.geometry.coordinates) continue;
+      const coords = f.geometry.coordinates;
+      if (f.geometry.type === 'LineString' && coords.length > 0) return { lng: coords[0][0], lat: coords[0][1] };
+      if (f.geometry.type === 'MultiLineString' && coords.length > 0 && coords[0].length > 0) return { lng: coords[0][0][0], lat: coords[0][0][1] };
+      if (f.geometry.type === 'Point' && coords.length >= 2) return { lng: coords[0], lat: coords[1] };
+    }
+    return null;
+  }
+
+  function enqueueReverseGeocode(track, lat, lng) {
+    geocodeQueue.push({ track, lat, lng });
+    if (!isGeocoding) processGeocodeQueue();
+  }
+
+  async function processGeocodeQueue() {
+    if (geocodeQueue.length === 0) { isGeocoding = false; return; }
+    isGeocoding = true;
+    const { track, lat, lng } = geocodeQueue.shift();
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=14&accept-language=zh-TW`);
+      if (res.ok) {
+        const data = await res.json();
+        const addr = data.address || {};
+        const autoLoc = [addr.city || addr.county || addr.state, addr.town || addr.suburb || addr.district, addr.peak || addr.mountain || addr.tourism].filter(Boolean).join(' ');
+        if (autoLoc && !track.location) {
+          track.location = autoLoc; applyFiltersAndRender();
+          if (selectedTrackId === track.id) document.getElementById('editLocation').value = track.location;
+          saveMetadataToStorage();
+        }
+      }
+    } catch (e) {}
+    setTimeout(processGeocodeQueue, 1100);
+  }
+
+  function extractCategoryFromFilename(fileName) {
+    const n = fileName.toLowerCase();
+    if (n.endsWith('.json') || n.includes('history') || n.includes('footprint') || n.includes('足跡')) return 'Google足跡';
+    if (n.includes('主題') || n.includes('專題')) return '主題地圖';
+    if (n.includes('台灣') || n.includes('國內') || n.includes('爬山') || n.includes('健行')) return '台灣旅遊地圖';
+    if (n.includes('出國') || n.includes('國外') || n.includes('日本') || n.includes('歐洲') || n.includes('中國')) return '出國旅遊地圖';
+    if (n.includes('參考') || n.includes('軌跡參考')) return '參考地圖';
+    if (n.includes('生活') || n.includes('日常') || n.includes('市區')) return '生活地圖';
+    return '';
+  }
+
+  async function parseTrackFile(file) {
+    const ext = '.' + file.name.split('.').pop().toLowerCase();
+    
+    if (ext === '.json') {
+      return await parseGoogleJsonFile(file);
+    }
+
+    let xmlText = ext === '.kmz' ? await (async () => {
+      const zip = await JSZip.loadAsync(file);
+      const kml = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.kml'));
+      if (!kml) throw new Error('KMZ 內找不到 KML');
+      return kml.async('string');
+    })() : await file.text();
+
+    const parser = new DOMParser();
+    const xmlDoc = parser.parseFromString(xmlText, 'text/xml');
+    
+    // 使用完整深度解析引擎取得所有獨立軌跡段與標記
+    const geojson = ext === '.gpx' ? parseFullGPX(xmlDoc, file.name) : parseFullKML(xmlDoc, file.name);
+
+    // 紀錄日期優先順序 1：內部 XML 時間標籤
+    let extractedDate = '';
+    const timeNodes = xmlDoc.querySelectorAll('trkpt time, wpt time, metadata time, time, when, TimeStamp when');
+    for (const node of timeNodes) {
+      if (node && node.textContent) {
+        const d = new Date(node.textContent.trim());
+        if (!isNaN(d.getTime())) { extractedDate = formatLocalDateTime(d).date; break; }
+      }
+    }
+    // 紀錄日期優先順序 2：檔名自動解析日期 (支援 8 碼如 20121201)
+    if (!extractedDate) {
+      const m8 = file.name.match(/(20\d{2})(\d{2})(\d{2})/) || file.name.match(/(19\d{2})(\d{2})(\d{2})/);
+      const mStd = file.name.match(/(20\d{2})[-_./]?(\d{2})[-_./]?(\d{2})/);
+      if (m8) extractedDate = `${m8[1]}-${m8[2]}-${m8[3]}`;
+      else if (mStd) extractedDate = `${mStd[1]}-${mStd[2]}-${mStd[3]}`;
+    }
+
+    let extractedLocation = '';
+    const locNode = xmlDoc.querySelector('Document > name, Folder > name, trk > name, rte > name, Placemark > name');
+    if (locNode && locNode.textContent && !/^(track|route|untitled|path|\d+)$/i.test(locNode.textContent.trim())) {
+      extractedLocation = locNode.textContent.trim();
+    }
+
+    const stats = calculateTrackStats(geojson);
+    const firstCoord = getFirstCoordFromGeoJSON(geojson);
+    return {
+      geojson,
+      extractedDate,
+      extractedLocation,
+      distance: stats.distance,
+      elevation: stats.elevation,
+      segmentsCount: stats.segmentsCount,
+      coordsCount: stats.coordsCount,
+      firstCoord,
+      rawContent: ext === '.kmz' ? await file.arrayBuffer() : xmlText
+    };
+  }
+
+  document.getElementById('btnConnectFolder').addEventListener('click', async () => {
+    if (!('showDirectoryPicker' in window)) { alert('您的瀏覽器不支援本機資料夾存取。'); return; }
+    try {
+      directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+      document.getElementById('syncStatus').textContent = `🟢 已連接: ${directoryHandle.name}`;
+      document.getElementById('syncStatus').className = 'text-[11px] px-2 py-0.5 rounded bg-emerald-900 text-emerald-200';
+      await loadTracksFromDirectory();
+    } catch (err) { if (err.name !== 'AbortError') alert('連接失敗：' + err.message); }
+  });
+
+  document.getElementById('btnRefreshFolder').addEventListener('click', async () => {
+    if (!directoryHandle) { alert('尚未連接電腦資料夾！'); return; }
+    try {
+      if (directoryHandle.requestPermission) await directoryHandle.requestPermission({ mode: 'readwrite' });
+      await loadTracksFromDirectory();
+      alert('重新整理成功！');
+    } catch (err) { alert('重新整理失敗：' + err.message); }
+  });
+
+  document.getElementById('fileInput').addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files);
+    if (!files.length) return;
+    const savedMeta = JSON.parse(localStorage.getItem('tracks_meta_fallback') || '{}');
+    for (const f of files) await addFileToSystem(f, null, savedMeta[f.name]);
+    updateYearFilterOptions(); applyFiltersAndRender(); fitAllVisibleTracks(); saveMetadataToStorage();
+    e.target.value = '';
+  });
+
+  async function loadTracksFromDirectory() {
+    tracks.forEach(t => { if (t.layerGroup) map.removeLayer(t.layerGroup); });
+    tracks = []; selectedTrackId = null; selectedForDeleteIds.clear();
+    document.getElementById('editPanel').classList.add('hidden');
+    let folderMeta = {};
+    try {
+      const metaHandle = await directoryHandle.getFileHandle(METADATA_FILENAME);
+      folderMeta = JSON.parse(await (await metaHandle.getFile()).text());
+    } catch (e) {}
+
+    for await (const [name, handle] of directoryHandle.entries()) {
+      if (handle.kind === 'file' && /\.(kml|kmz|gpx|json)$/i.test(name)) {
+        await addFileToSystem(await handle.getFile(), handle, folderMeta[name]);
+      }
+    }
+    updateYearFilterOptions(); applyFiltersAndRender(); fitAllVisibleTracks(); saveMetadataToStorage();
+  }
+
+  async function addFileToSystem(file, fileHandle, savedMeta = {}) {
+    try {
+      const parsed = await parseTrackFile(file);
+      const lastDot = file.name.lastIndexOf('.');
+      const baseName = lastDot !== -1 ? file.name.substring(0, lastDot) : file.name;
+      const ext = lastDot !== -1 ? file.name.substring(lastDot) : '';
+      
+      const autoCat = extractCategoryFromFilename(file.name);
+      const trackCat = savedMeta?.category !== undefined ? savedMeta.category : autoCat;
+      
+      const defaultCol = trackCat === 'Google足跡' ? GOOGLE_JSON_COLOR : DEFAULT_COLORS[tracks.length % DEFAULT_COLORS.length];
+      const color = savedMeta?.color || defaultCol;
+
+      const stats = calculateTrackStats(parsed.geojson);
+
+      const trackObj = {
+        id: 'trk_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+        fileName: file.name, baseName, ext, fileHandle,
+        rawContent: parsed.rawContent, geojson: parsed.geojson,
+        category: trackCat,
+        date: parsed.extractedDate || savedMeta?.date || '',
+        location: savedMeta?.location || parsed.extractedLocation || '',
+        notes: savedMeta?.notes || '',
+        distance: stats.distance || '0.00',
+        elevation: stats.elevation || '0',
+        segmentsCount: stats.segmentsCount || 0,
+        coordsCount: stats.coordsCount || 0,
+        color, weight: savedMeta?.weight || 4,
+        visible: savedMeta?.visible !== undefined ? savedMeta.visible : true,
+        waypoints: savedMeta?.waypoints || [], layerGroup: null
+      };
+      tracks.push(trackObj);
+      renderMapLayers(trackObj);
+      if (!savedMeta?.location && parsed.firstCoord) enqueueReverseGeocode(trackObj, parsed.firstCoord.lat, parsed.firstCoord.lng);
+    } catch (err) { console.error(err); }
+  }
+
+  document.getElementById('btnMergeTracks').addEventListener('click', async () => {
+    const sel = tracks.filter(t => selectedForDeleteIds.has(t.id));
+    if (sel.length < 2) { alert('請至少勾選 2 個檔案進行組合！'); return; }
+    const newName = prompt('請輸入組合後的新檔名：', 'Merged_Map');
+    if (!newName) return;
+
+    let gpxXml = '';
+    sel.forEach(t => {
+      if (t.geojson && t.geojson.features) {
+        t.geojson.features.forEach(f => {
+          if (f.geometry && f.geometry.type === 'LineString') {
+            gpxXml += `  <trk>\n    <name>${escapeHtml(f.properties?.name || t.fileName)}</name>\n    <trkseg>\n`;
+            f.geometry.coordinates.forEach(c => {
+              const eleTag = c.length > 2 && c[2] !== null ? `<ele>${c[2]}</ele>` : '';
+              gpxXml += `      <trkpt lat="${c[1]}" lon="${c[0]}">${eleTag}</trkpt>\n`;
+            });
+            gpxXml += `    </trkseg>\n  </trk>\n`;
+          } else if (f.geometry && f.geometry.type === 'Point') {
+            const c = f.geometry.coordinates;
+            gpxXml += `  <wpt lat="${c[1]}" lon="${c[0]}"><name>${escapeHtml(f.properties?.name || '航點')}</name></wpt>\n`;
+          }
+        });
+      }
+    });
+
+    const content = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.0" xmlns="http://www.topografix.com/GPX/1/0">\n${gpxXml}</gpx>`;
+    const blob = new Blob([content], { type: 'application/gpx+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `${newName}.gpx`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+
+    const newFile = new File([blob], `${newName}.gpx`, { type: 'application/gpx+xml' });
+    await addFileToSystem(newFile, null, {});
+    updateYearFilterOptions(); applyFiltersAndRender(); fitAllVisibleTracks(); saveMetadataToStorage();
+    alert('地圖組合完成並已下載！');
+  });
+
+  document.getElementById('editCategorySelect').addEventListener('change', (e) => {
+    const custom = document.getElementById('editCategoryCustom');
+    if (e.target.value === '其他自訂') custom.classList.remove('hidden');
+    else custom.classList.add('hidden');
+  });
+
+  // ======================= 比照旅遊地圖遊記：完整繪製所有獨立軌跡段、起終點與內嵌航點 =======================
+  function renderMapLayers(track) {
+    if (track.layerGroup) map.removeLayer(track.layerGroup);
+    const layerGroup = L.featureGroup();
+
+    let firstLineCoord = null;
+    let lastLineCoord = null;
+
+    if (track.geojson && Array.isArray(track.geojson.features)) {
+      track.geojson.features.forEach(feature => {
+        if (!feature.geometry) return;
+        const gType = feature.geometry.type;
+        const coords = feature.geometry.coordinates;
+
+        // 繪製單段或多段軌跡線
+        const drawLine = (lineCoords, segName) => {
+          const latlngs = lineCoords
+            .map(c => [Number(c[1]), Number(c[0])])
+            .filter(ll => !isNaN(ll[0]) && !isNaN(ll[1]));
+          if (latlngs.length < 2) return;
+
+          if (!firstLineCoord) firstLineCoord = latlngs[0];
+          lastLineCoord = latlngs[latlngs.length - 1];
+
+          const polyline = L.polyline(latlngs, {
+            color: track.color,
+            weight: Number(track.weight),
+            opacity: 0.9,
+            lineCap: 'round',
+            lineJoin: 'round'
+          });
+
+          polyline.on('click', (e) => {
+            if (isSplittingTrack || isAddingWaypoint) return;
+            L.DomEvent.stopPropagation(e);
+            selectTrack(track.id, false);
+            polyline.openPopup(e.latlng);
+          });
+
+          polyline.on('mouseover', () => {
+            polyline.setStyle({ weight: Number(track.weight) + 3, opacity: 1 });
+          });
+          polyline.on('mouseout', () => {
+            polyline.setStyle({ weight: Number(track.weight), opacity: 0.9 });
+          });
+
+          polyline.bindPopup(() => createTrackPopupHTML(track, segName), { maxWidth: 500 });
+          layerGroup.addLayer(polyline);
+        };
+
+        if (gType === 'LineString') {
+          drawLine(coords, feature.properties?.name);
+        } else if (gType === 'MultiLineString' || gType === 'Polygon') {
+          coords.forEach(sub => drawLine(sub, feature.properties?.name));
+        } else if (gType === 'Point') {
+          const lon = Number(coords[0]), lat = Number(coords[1]);
+          if (!isNaN(lat) && !isNaN(lon)) {
+            const ptName = feature.properties?.name || '航點';
+            const ptDesc = feature.properties?.description || '';
+            const cMarker = L.circleMarker([lat, lon], {
+              radius: 5,
+              fillColor: track.color,
+              color: '#ffffff',
+              weight: 2,
+              fillOpacity: 0.95
+            });
+            cMarker.bindPopup(`
+              <div class="text-xs space-y-1">
+                <div class="font-bold text-slate-800">📍 ${escapeHtml(ptName)}</div>
+                ${ptDesc ? `<div class="text-slate-600">${escapeHtml(ptDesc)}</div>` : ''}
+                <div class="text-[10px] text-slate-400">檔案：${escapeHtml(track.fileName)}</div>
+              </div>
+            `);
+            cMarker.on('click', (e) => {
+              if (isSplittingTrack || isAddingWaypoint) return;
+              L.DomEvent.stopPropagation(e);
+              selectTrack(track.id, false);
+              cMarker.openPopup();
+            });
+            layerGroup.addLayer(cMarker);
+          }
+        }
+      });
+    }
+
+    // 標示完整路徑的「起點 (S)」與「終點 (E)」圓標
+    if (firstLineCoord) {
+      const startMarker = L.marker(firstLineCoord, {
+        icon: L.divIcon({
+          className: 'endpoint-badge',
+          html: '<div style="background:#16a34a;width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;">S</div>',
+          iconSize: [18, 18],
+          iconAnchor: [9, 9]
+        })
+      }).bindPopup(`<div class="text-xs font-bold text-emerald-700">🟢 起點：${escapeHtml(track.fileName)}</div>`);
+      startMarker.on('click', () => selectTrack(track.id, false));
+      layerGroup.addLayer(startMarker);
+    }
+
+    if (lastLineCoord && (lastLineCoord[0] !== firstLineCoord?.[0] || lastLineCoord[1] !== firstLineCoord?.[1])) {
+      const endMarker = L.marker(lastLineCoord, {
+        icon: L.divIcon({
+          className: 'endpoint-badge',
+          html: '<div style="background:#dc2626;width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:2px solid #fff;">E</div>',
+          iconSize: [18, 18],
+          iconAnchor: [9, 9]
+        })
+      }).bindPopup(`<div class="text-xs font-bold text-red-700">🏁 終點：${escapeHtml(track.fileName)}</div>`);
+      endMarker.on('click', () => selectTrack(track.id, false));
+      layerGroup.addLayer(endMarker);
+    }
+
+    // 繪製使用者手動新增的標記地點
+    track.waypoints.forEach(wp => {
+      const marker = L.marker([wp.lat, wp.lng]);
+      marker.bindPopup(`<div class="text-xs"><b>📍 ${escapeHtml(wp.name)}</b><br>${escapeHtml(wp.desc)}</div>`);
+      marker.on('click', () => selectTrack(track.id, false));
+      layerGroup.addLayer(marker);
+    });
+
+    track.layerGroup = layerGroup;
+    if (track.visible) layerGroup.addTo(map);
+  }
+
+  function createTrackPopupHTML(track, segName) {
+    return `
+      <div class="resizable-popup text-xs space-y-1 pr-1">
+        <div class="flex items-center justify-between border-b pb-1 gap-2">
+          <div class="font-bold text-sm text-blue-700 truncate">${escapeHtml(track.fileName)}</div>
+          <button type="button" onclick="togglePopupSize(this)" class="text-[10px] bg-slate-100 hover:bg-slate-200 px-1.5 py-0.5 rounded border">🔍 放大</button>
+        </div>
+        ${segName && segName !== track.fileName ? `<div class="text-[11px] text-indigo-600 font-semibold">🛤️ 區段：${escapeHtml(segName)}</div>` : ''}
+        ${track.category ? `<div><b>分類：</b>${escapeHtml(track.category)}</div>` : ''}
+        ${track.date ? `<div><b>日期：</b>${track.date}</div>` : ''}
+        <div><b>地點：</b>${escapeHtml(track.location || '未填寫')}</div>
+        <div><b>距離/爬升：</b>📏 ${track.distance} km / ⛰️ ${track.elevation} m</div>
+      </div>
+    `;
+  }
+
+  function updateYearFilterOptions() {
+    const years = new Set();
+    tracks.forEach(t => { if (t.date && t.date.length >= 4) years.add(t.date.substring(0, 4)); });
+    const sorted = Array.from(years).sort((a, b) => b.localeCompare(a));
+    const sel = document.getElementById('filterYear');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">所有年份</option>' + sorted.map(y => `<option value="${y}">${y} 年</option>`).join('');
+    sel.value = cur;
+  }
+
+  function getFilteredTracks() {
+    const cat = document.getElementById('filterCategory').value;
+    const yr = document.getElementById('filterYear').value;
+    const kw = document.getElementById('filterLocation').value.trim().toLowerCase();
+    const preset = ['主題地圖', '台灣旅遊地圖', '出國旅遊地圖', '參考地圖', '生活地圖', 'Google足跡'];
+
+    return tracks.filter(t => {
+      if (cat) {
+        if (cat === '其他自訂分類') { if (preset.includes(t.category) || !t.category) return false; }
+        else if (t.category !== cat) return false;
+      }
+      if (yr && (!t.date || !t.date.startsWith(yr))) return false;
+      if (kw) {
+        let sKw = kw;
+        if (/^\d{8}$/.test(kw)) sKw = `${kw.substring(0,4)}-${kw.substring(4,6)}-${kw.substring(6,8)}`;
+        if (!t.fileName.toLowerCase().includes(sKw) && (!t.date || !t.date.includes(sKw))) return false;
+      }
+      return true;
+    }).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  }
+
+  function applyFiltersAndRender() {
+    const filtered = getFilteredTracks();
+    const fIds = new Set(filtered.map(t => t.id));
+    document.getElementById('trackCount').textContent = `顯示 ${filtered.length} / 共 ${tracks.length} 筆`;
+
+    tracks.forEach(t => {
+      if (!t.layerGroup) return;
+      if (fIds.has(t.id) && t.visible) { if (!map.hasLayer(t.layerGroup)) map.addLayer(t.layerGroup); }
+      else { if (map.hasLayer(t.layerGroup)) map.removeLayer(t.layerGroup); }
+    });
+    updateBatchDeleteUI(filtered);
+
+    const listEl = document.getElementById('trackList');
+    if (filtered.length === 0) { listEl.innerHTML = `<div class="text-center text-slate-400 mt-12 text-sm">沒有符合條件的檔案</div>`; return; }
+
+    listEl.innerHTML = filtered.map(t => `
+      <div id="card_${t.id}" class="p-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition shadow-sm cursor-pointer flex items-start gap-2 ${t.id === selectedTrackId ? 'active-track-card' : ''}" onclick="selectTrack('${t.id}', true)">
+        <input type="checkbox" ${t.visible ? 'checked' : ''} class="mt-1 rounded text-blue-600 cursor-pointer" onclick="toggleTrackVisibility(event, '${t.id}')">
+        <span class="w-3 h-3 rounded-full mt-1 shrink-0 border" style="background-color: ${t.color}"></span>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center justify-between gap-1">
+            <div class="font-bold text-xs text-slate-800 truncate">${escapeHtml(t.fileName)}</div>
+            ${t.category ? `<span class="text-[10px] bg-slate-100 px-1 rounded">${escapeHtml(t.category)}</span>` : ''}
+          </div>
+          <div class="flex flex-wrap items-center gap-1 text-[11px] text-slate-500 mt-1">
+            ${t.date ? `<span>📅 ${t.date}</span>` : ''}
+            <span class="bg-blue-50 text-blue-700 px-1 rounded font-semibold">📏 ${t.distance}km / ⛰️ ${t.elevation}m</span>
+          </div>
+        </div>
+        <label class="flex items-center gap-1 text-[11px] text-red-600 cursor-pointer shrink-0" onclick="event.stopPropagation();">
+          <input type="checkbox" ${selectedForDeleteIds.has(t.id) ? 'checked' : ''} class="rounded text-red-600" onchange="toggleTrackDeleteSelection(event, '${t.id}')">
+          <span>選取</span>
+        </label>
+      </div>
+    `).join('');
+  }
+
+  window.toggleTrackVisibility = (e, id) => { e.stopPropagation(); const t = tracks.find(x => x.id === id); if(t){ t.visible = e.target.checked; applyFiltersAndRender(); saveMetadataToStorage(); } };
+  window.toggleTrackDeleteSelection = (e, id) => { e.stopPropagation(); if(e.target.checked) selectedForDeleteIds.add(id); else selectedForDeleteIds.delete(id); updateBatchDeleteUI(getFilteredTracks()); };
+
+  function updateBatchDeleteUI(filtered) {
+    const valid = new Set(tracks.map(t => t.id));
+    for(const id of selectedForDeleteIds) if(!valid.has(id)) selectedForDeleteIds.delete(id);
+    const cnt = selectedForDeleteIds.size;
+    document.getElementById('btnBatchDelete').textContent = `🗑️ 刪除 (${cnt})`;
+    document.getElementById('btnBatchDelete').disabled = cnt === 0;
+    document.getElementById('btnMergeTracks').textContent = `🧩 組合 (${cnt})`;
+    document.getElementById('btnMergeTracks').disabled = cnt < 2;
+  }
+
+  document.getElementById('toggleAllDeleteSelect').addEventListener('change', (e) => {
+    const chk = e.target.checked; getFilteredTracks().forEach(t => { if(chk) selectedForDeleteIds.add(t.id); else selectedForDeleteIds.delete(t.id); });
+    applyFiltersAndRender();
+  });
+
+  document.getElementById('btnBatchDelete').addEventListener('click', async () => {
+    const toDel = tracks.filter(t => selectedForDeleteIds.has(t.id));
+    if (!toDel.length || !confirm(`確定要刪除選取的 ${toDel.length} 個檔案嗎？`)) return;
+    for (const t of toDel) {
+      if (directoryHandle && t.fileHandle) { try { await directoryHandle.removeEntry(t.fileName); } catch(e){} }
+      if (t.layerGroup) map.removeLayer(t.layerGroup);
+      tracks = tracks.filter(x => x.id !== t.id); selectedForDeleteIds.delete(t.id);
+    }
+    if (selectedTrackId) { selectedTrackId = null; document.getElementById('editPanel').classList.add('hidden'); }
+    updateYearFilterOptions(); applyFiltersAndRender(); saveMetadataToStorage();
+  });
+
+  document.getElementById('toggleAllVisible').addEventListener('change', (e) => { getFilteredTracks().forEach(t => t.visible = e.target.checked); applyFiltersAndRender(); saveMetadataToStorage(); });
+  ['filterCategory', 'filterYear', 'filterLocation'].forEach(id => document.getElementById(id).addEventListener('input', applyFiltersAndRender));
+  document.getElementById('btnResetFilter').addEventListener('click', () => { document.getElementById('filterCategory').value = ''; document.getElementById('filterYear').value = ''; document.getElementById('filterLocation').value = ''; applyFiltersAndRender(); });
+
+  window.selectTrack = function(id, zoomTo = false) {
+    selectedTrackId = id;
+    const track = tracks.find(t => t.id === id);
+    if (!track) return;
+    document.querySelectorAll('[id^="card_"]').forEach(el => el.classList.remove('active-track-card'));
+    const card = document.getElementById('card_' + id); if(card) { card.classList.add('active-track-card'); card.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+
+    document.getElementById('editPanel').classList.remove('hidden');
+    document.getElementById('editPanelTitleText').textContent = track.fileName;
+    document.getElementById('editFileName').value = track.baseName;
+    document.getElementById('editFileExt').textContent = track.ext;
+
+    const preset = ['主題地圖', '台灣旅遊地圖', '出國旅遊地圖', '參考地圖', '生活地圖', 'Google足跡'];
+    const cSel = document.getElementById('editCategorySelect');
+    const cCust = document.getElementById('editCategoryCustom');
+    if (preset.includes(track.category)) { cSel.value = track.category; cCust.classList.add('hidden'); cCust.value = ''; }
+    else if (track.category) { cSel.value = '其他自訂'; cCust.classList.remove('hidden'); cCust.value = track.category; }
+    else { cSel.value = '台灣旅遊地圖'; cCust.classList.add('hidden'); cCust.value = ''; }
+
+    document.getElementById('editDate').value = track.date || '';
+    document.getElementById('editLocation').value = track.location;
+    document.getElementById('editColor').value = track.color;
+    document.getElementById('editColorHex').textContent = track.color.toUpperCase();
+    document.getElementById('editWeight').value = track.weight;
+    document.getElementById('weightVal').textContent = track.weight;
+    document.getElementById('metaDistance').textContent = `${track.distance} km`;
+    document.getElementById('metaElevation').textContent = `${track.elevation} m`;
+    document.getElementById('metaSegments').textContent = track.segmentsCount || 1;
+    document.getElementById('metaCoordsCount').textContent = track.coordsCount || 0;
+
+    renderWaypointList(track);
+    if (zoomTo && track.layerGroup && track.layerGroup.getBounds().isValid()) map.fitBounds(track.layerGroup.getBounds(), { padding: [50, 50] });
+    if (isVertexEditing) renderVertexHandles(track);
+  };
+
+  document.getElementById('editColor').addEventListener('input', (e) => {
+    document.getElementById('editColorHex').textContent = e.target.value.toUpperCase();
+    const t = tracks.find(x => x.id === selectedTrackId); if(t) { t.color = e.target.value; renderMapLayers(t); }
+  });
+  document.getElementById('editWeight').addEventListener('input', (e) => {
+    document.getElementById('weightVal').textContent = e.target.value;
+    const t = tracks.find(x => x.id === selectedTrackId); if(t) { t.weight = Number(e.target.value); renderMapLayers(t); }
+  });
+
+  function renderWaypointList(track) {
+    const c = document.getElementById('waypointList');
+    if (!track.waypoints || !track.waypoints.length) { c.innerHTML = `<div class="text-slate-400 text-center py-2">尚無標記地點</div>`; return; }
+    c.innerHTML = track.waypoints.map(wp => `
+      <div class="flex items-center justify-between bg-slate-50 px-2 py-1 rounded border">
+        <div class="truncate cursor-pointer flex-1" onclick="map.setView([${wp.lat}, ${wp.lng}], 16)">📍 ${escapeHtml(wp.name)}</div>
+        <button onclick="deleteWaypoint('${wp.id}')" class="text-red-500 font-bold ml-1">&times;</button>
+      </div>
+    `).join('');
+  }
+
+  window.deleteWaypoint = (wpId) => {
+    const t = tracks.find(x => x.id === selectedTrackId); if(!t) return;
+    t.waypoints = t.waypoints.filter(w => w.id !== wpId);
+    renderMapLayers(t); renderWaypointList(t); saveMetadataToStorage();
+  };
+
+  document.getElementById('btnStartAddWaypoint').addEventListener('click', () => { isAddingWaypoint = true; document.getElementById('addWaypointBanner').classList.remove('hidden'); map.style.cursor = 'crosshair'; });
+  document.getElementById('btnCancelWaypoint').addEventListener('click', () => { isAddingWaypoint = false; document.getElementById('addWaypointBanner').classList.add('hidden'); map.style.cursor = ''; });
+  document.getElementById('btnCloseEdit').addEventListener('click', () => {
+    document.getElementById('editPanel').classList.add('hidden');
+    isVertexEditing = false; vertexMarkersGroup.clearLayers();
+    document.getElementById('btnToggleVertexEdit').className = 'bg-indigo-600 hover:bg-indigo-500 text-white py-1.5 px-2 rounded font-medium transition shadow-sm flex items-center justify-center gap-1';
+    document.getElementById('btnToggleVertexEdit').textContent = '✏️ 開啟節點編輯 (拖曳點位)';
+  });
+  document.getElementById('btnZoomToTrack').addEventListener('click', () => { const t = tracks.find(x => x.id === selectedTrackId); if(t && t.layerGroup) map.fitBounds(t.layerGroup.getBounds(), { padding: [50, 50] }); });
+
+  document.getElementById('btnSaveTrack').addEventListener('click', async () => {
+    const t = tracks.find(x => x.id === selectedTrackId); if (!t) return;
+    const newBase = document.getElementById('editFileName').value.trim();
+    if (!newBase) { alert('檔名不能為空！'); return; }
+    const newFull = newBase + t.ext;
+
+    if (newFull !== t.fileName && directoryHandle && t.fileHandle) {
+      try {
+        if ('move' in t.fileHandle) await t.fileHandle.move(newFull);
+        else {
+          const nh = await directoryHandle.getFileHandle(newFull, { create: true });
+          const w = await nh.createWritable(); await w.write(t.rawContent); await w.close();
+          await directoryHandle.removeEntry(t.fileName); t.fileHandle = nh;
+        }
+      } catch(err) { alert('同步修改硬碟檔名失敗：' + err.message); return; }
+      t.baseName = newBase; t.fileName = newFull;
+    }
+
+    const sCat = document.getElementById('editCategorySelect').value;
+    const cCust = document.getElementById('editCategoryCustom').value.trim();
+    t.category = sCat === '其他自訂' ? cCust : sCat;
+    t.date = document.getElementById('editDate').value;
+    t.location = document.getElementById('editLocation').value.trim();
+    t.color = document.getElementById('editColor').value;
+    t.weight = Number(document.getElementById('editWeight').value);
+
+    document.getElementById('editPanelTitleText').textContent = t.fileName;
+    renderMapLayers(t); updateYearFilterOptions(); applyFiltersAndRender(); await saveMetadataToStorage();
+    const btn = document.getElementById('btnSaveTrack'); btn.textContent = '✅ 已儲存！'; setTimeout(() => btn.textContent = '💾 儲存修改', 1500);
+  });
+
+  document.getElementById('btnDeleteTrack').addEventListener('click', async () => {
+    const t = tracks.find(x => x.id === selectedTrackId); if (!t) return;
+    if (!confirm(`確定要刪除「${t.fileName}」嗎？`)) return;
+    if (directoryHandle && t.fileHandle) { try { await directoryHandle.removeEntry(t.fileName); } catch(e){} }
+    if (t.layerGroup) map.removeLayer(t.layerGroup);
+    tracks = tracks.filter(x => x.id !== t.id); selectedForDeleteIds.delete(t.id);
+    selectedTrackId = null; document.getElementById('editPanel').classList.add('hidden');
+    updateYearFilterOptions(); applyFiltersAndRender(); saveMetadataToStorage();
+  });
+
+  async function saveMetadataToStorage() {
+    const meta = {};
+    tracks.forEach(t => { meta[t.fileName] = { category: t.category, date: t.date, location: t.location, distance: t.distance, elevation: t.elevation, color: t.color, weight: t.weight, visible: t.visible, waypoints: t.waypoints }; });
+    if (directoryHandle) {
+      try {
+        const h = await directoryHandle.getFileHandle(METADATA_FILENAME, { create: true });
+        const w = await h.createWritable(); await w.write(JSON.stringify(meta, null, 2)); await w.close();
+      } catch(e){}
+    } else { localStorage.setItem('tracks_meta_fallback', JSON.stringify(meta)); }
+  }
+
+  function fitAllVisibleTracks() {
+    const g = L.featureGroup(); tracks.forEach(t => { if(t.visible && t.layerGroup) g.addLayer(t.layerGroup); });
+    if (g.getLayers().length > 0 && g.getBounds().isValid()) map.fitBounds(g.getBounds(), { padding: [40, 40] });
+  }
+  function escapeHtml(str) { return !str ? '' : str.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])); }
+
+  window.addEventListener('load', initMap);
+</script>
+</body>
+</html>
